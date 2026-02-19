@@ -28,6 +28,11 @@ uint64 sys_sched_yield()
 	return 0;
 }
 
+uint64 sys_getpid(void)
+{
+    return curr_proc()->pid;
+}
+
 uint64 sys_gettimeofday(TimeVal *val, int _tz)
 {
 	uint64 cycle = get_cycle();
@@ -39,6 +44,41 @@ uint64 sys_gettimeofday(TimeVal *val, int _tz)
 /*
 * LAB1: you may need to define sys_task_info here
 */
+int sys_task_info(TaskInfo *ti){
+	// grab process currently being ran
+	struct proc *p = curr_proc();
+
+	// convert procstate enum to TaskStatus enum
+	switch(p->state){
+		case RUNNING:
+    		ti->status = Running;
+    		break;
+		case RUNNABLE:
+		case USED:
+		case SLEEPING:
+    		ti->status = Ready;
+    		break;
+		case ZOMBIE:
+    		ti->status = Exited;
+    		break;
+		case UNUSED:
+		default:
+    		ti->status = UnInit;
+    		break;
+	}
+
+	// Get the number of syscalls from proc
+	memmove(ti->syscall_times, p->syscall_times, sizeof(p->syscall_times));
+
+	// Calculate time
+	uint64 now = get_cycle();
+	if (p->start_time == 0)
+    	ti->time = 0;
+	else
+    	ti->time = (int)((now - p->start_time) * 1000 / CPU_FREQ);
+
+	return 0;
+}
 
 extern char trap_page[];
 
@@ -53,10 +93,17 @@ void syscall()
 	/*
 	* LAB1: you may need to update syscall counter for task info here
 	*/
+
+	curr_proc()->syscall_times[id]++;
+
+
 	switch (id) {
 	case SYS_write:
 		ret = sys_write(args[0], (char *)args[1], args[2]);
 		break;
+	case SYS_getpid:
+    	ret = (int)sys_getpid();
+    	break;
 	case SYS_exit:
 		sys_exit(args[0]);
 		// __builtin_unreachable();
@@ -69,6 +116,11 @@ void syscall()
 	/*
 	* LAB1: you may need to add SYS_taskinfo case here
 	*/
+
+	case SYS_task_info:
+		ret = sys_task_info((TaskInfo *)args[0]);
+		break;
+	
 	default:
 		ret = -1;
 		errorf("unknown syscall %d", id);

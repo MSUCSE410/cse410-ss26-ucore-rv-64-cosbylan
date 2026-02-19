@@ -25,6 +25,8 @@ struct context {
 	uint64 s11;
 };
 
+#define MAX_SYSCALL_NUM 500
+
 enum procstate { UNUSED, USED, SLEEPING, RUNNABLE, RUNNING, ZOMBIE };
 
 // Per-process state
@@ -38,11 +40,26 @@ struct proc {
 	/*
 	* LAB1: you may need to add some new fields here
 	*/
+	unsigned int syscall_times[MAX_SYSCALL_NUM];
+	int start_time;
 };
 
 /*
 * LAB1: you may need to define struct for TaskInfo here
 */
+
+typedef enum {
+	UnInit,
+	Ready,
+	Running,
+	Exited,
+} TaskStatus;
+
+typedef struct {
+	TaskStatus status;
+	unsigned int syscall_times[MAX_SYSCALL_NUM];
+	int time;
+} TaskInfo;
 
 struct proc *curr_proc();
 void exit(int);
