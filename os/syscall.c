@@ -32,11 +32,123 @@ uint64 sys_sched_yield()
 	return 0;
 }
 
+uint64 sys_getpid(void)
+{
+    return curr_proc()->pid;
+}
+
+uint64 sys_mmap(uint64 start, uint64 len, int port, int flag, int fd){
+	struct proc *p = curr_proc();
+
+	// Start must be page aligned, as required in some vm.c functions
+	if ((start % PGSIZE) != 0){
+		return -1;
+	}
+
+	// Following 4 are cases check for errors pinted out in the instructions
+	uint64 end = start + len;
+	if (end < start){
+		return -1;
+	}
+
+	if (len > (1UL << 30)){
+		return -1;
+	}
+
+	if ((port & ~0x7) != 0){
+		return -1;
+	}
+
+	if ((port & 0x7) == 0){
+		return -1;
+	}
+
+	// Determine number of pages needed for requested len
+	uint64 map_len = PGROUNDUP(len);
+	uint64 map_end = start + map_len;
+	
+	// Check needed to pass Test 04_3
+	if(map_end < start){
+		return -1;
+	}
+
+	// Check to make sure that none of the pages assinged have alreaby been mapped by using walkaddr
+	for (uint64 va = start; va < map_end; va += PGSIZE) {
+		if (walkaddr(p->pagetable, va) != 0)
+			return -1;
+	}
+
+	// Determine permission based on bits provided
+	int perm = PTE_U;
+	if (port & 0x1){
+		perm |= PTE_R;
+	}
+	if (port & 0x2){
+		perm |= PTE_W;
+	}
+	if (port & 0x4){
+		perm |= PTE_X;
+	}
+
+	// Allocate and map each page
+	for (uint64 va = start; va < map_end; va += PGSIZE) {
+		void *pa = kalloc();
+
+		// If mapping fails, then unmap and free all pages that were already done.
+		if (pa == 0) {
+			uvmunmap(p->pagetable, start, (va - start) / PGSIZE, 1);
+			return -1;
+		}
+
+		// Inserts the mapping into the process's page table, but if it fails then free everything
+		if (mappages(p->pagetable, va, PGSIZE, (uint64)pa, perm) != 0) {
+			kfree(pa);
+			uvmunmap(p->pagetable, start, (va - start) / PGSIZE, 1);
+			return -1;
+		}
+	}
+
+	return 0;
+}
+
+uint64 sys_munmap(uint64 start, uint64 len){
+	struct proc *p = curr_proc();
+
+	// Must be page aligned
+	if ((start % PGSIZE) != 0){
+		return -1;
+	}
+
+	uint64 end = start + len;
+	
+	// Ensure all pages are in range are mapped
+	for (uint64 va = start; va < end; va += PGSIZE) {
+		if (walkaddr(p->pagetable, va) == 0){
+			return -1;
+		}
+	}
+
+	// Removes the mapping
+	uvmunmap(p->pagetable, start, len / PGSIZE, 1);
+	return 0;
+}
+
 uint64 sys_gettimeofday(TimeVal *val, int _tz) // TODO: implement sys_gettimeofday in pagetable. (VA to PA)
 {
 	// YOUR CODE
-	val->sec = 0;
-	val->usec = 0;
+	struct proc *p = curr_proc();
+
+	// Transform address from virtual to physical so solution from project 1 will work.
+	uint64 pa = useraddr(p->pagetable, (uint64)val);
+	if(pa == 0){
+		return -1;
+	}
+
+	val = (TimeVal *)pa;
+
+	uint64 cycle = get_cycle();
+	val->sec = cycle / CPU_FREQ;
+	val->usec = (cycle % CPU_FREQ) * 1000000 / CPU_FREQ;
 
 	/* The code in `ch3` will leads to memory bugs*/
 
@@ -53,6 +165,50 @@ uint64 sys_gettimeofday(TimeVal *val, int _tz) // TODO: implement sys_gettimeofd
 * LAB1: you may need to define sys_task_info here
 */
 
+int sys_task_info(TaskInfo *ti){
+	// grab process currently being ran
+	struct proc *p = curr_proc();
+
+	// With virtual memory now in use, we must first use useraddr function to turn virtual address to physical.
+	uint64 pa = useraddr(p->pagetable, (uint64)ti);
+	if(pa == 0){
+		return -1;
+	}
+
+	ti = (TaskInfo *)pa;
+
+	// convert procstate enum to TaskStatus enum
+	switch(p->state){
+		case RUNNING:
+    		ti->status = Running;
+    		break;
+		case RUNNABLE:
+		case USED:
+		case SLEEPING:
+    		ti->status = Ready;
+    		break;
+		case ZOMBIE:
+    		ti->status = Exited;
+    		break;
+		case UNUSED:
+		default:
+    		ti->status = UnInit;
+    		break;
+	}
+
+	// Get the number of syscalls from proc
+	memmove(ti->syscall_times, p->syscall_times, sizeof(p->syscall_times));
+
+	// Calculate time
+	uint64 now = get_cycle() / (CPU_FREQ / 1000);
+	if (p->start_time == 0)
+    	ti->time = 0;
+	else
+    	ti->time = (int)((now - p->start_time));
+
+	return 0;
+}
+
 extern char trap_page[];
 
 void syscall()
@@ -63,13 +219,20 @@ void syscall()
 			   trapframe->a3, trapframe->a4, trapframe->a5 };
 	tracef("syscall %d args = [%x, %x, %x, %x, %x, %x]", id, args[0],
 	       args[1], args[2], args[3], args[4], args[5]);
+
 	/*
 	* LAB1: you may need to update syscall counter for task info here
 	*/
+
+		curr_proc()->syscall_times[id]++;
+
 	switch (id) {
 	case SYS_write:
 		ret = sys_write(args[0], args[1], args[2]);
 		break;
+	case SYS_getpid:
+    ret = (int)sys_getpid();
+    	break;
 	case SYS_exit:
 		sys_exit(args[0]);
 		// __builtin_unreachable();
@@ -79,9 +242,22 @@ void syscall()
 	case SYS_gettimeofday:
 		ret = sys_gettimeofday((TimeVal *)args[0], args[1]);
 		break;
+
+	// New cases so that the functions are called when needed.
+	case SYS_mmap:
+	ret = sys_mmap(args[0], args[1], args[2], args[3], args[4]);
+		break;
+	case SYS_munmap:
+	ret = sys_munmap(args[0], args[1]);
+		break;
 	/*
 	* LAB1: you may need to add SYS_taskinfo case here
 	*/
+
+	case SYS_task_info:
+		ret = sys_task_info((TaskInfo *)args[0]);
+		break;
+
 	default:
 		ret = -1;
 		errorf("unknown syscall %d", id);
