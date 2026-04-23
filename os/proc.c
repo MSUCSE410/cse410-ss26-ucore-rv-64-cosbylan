@@ -56,10 +56,29 @@ struct proc *fetch_task()
 	return pool + index;
 }
 
+// Scans all processes and picks the best option to run next
+struct proc *pick_next_task()
+{
+	struct proc *best = NULL;
+
+	for (struct proc *p = pool; p < &pool[NPROC]; p++) {
+		if (p->state != RUNNABLE)
+			continue;
+
+		// Added a tie breaker in case both pass's are equal, runs the one with cmaller pid
+		if (best == NULL || p->pass < best->pass ||
+		    (p->pass == best->pass && p->pid < best->pid)) {
+			best = p;
+		}
+	}
+
+	return best;
+}
+
+// Removed functionality instead of removing all calls made to this func
 void add_task(struct proc *p)
 {
-	push_queue(&task_queue, p - pool);
-	debugf("add task %d(pid=%d) to task queue\n", p - pool, p->pid);
+	(void)p;
 }
 
 // Look in the process table for an UNUSED proc.
@@ -89,39 +108,38 @@ found:
 	memset((void *)p->trapframe, 0, TRAP_PAGE_SIZE);
 	p->context.ra = (uint64)usertrapret;
 	p->context.sp = p->kstack + KSTACK_SIZE;
+
+	// Fill variables with default values
+	p->priority = DEFAULT_PRIORITY;
+	p->stride = BIG_STRIDE / p->priority;
+	p->pass = 0;
+
 	return p;
 }
 
-// Scheduler never returns.  It loops, doing:
-//  - choose a process to run.
-//  - swtch to start running that process.
-//  - eventually that process transfers control
-//    via swtch back to the scheduler.
+// Changed logic of Scheduler, now it chooses the runnable process
+// with the smallest passs value, runs it for one time slice,
+// increases that process's pass by its stride and then chooses the
+// next process to run
 void scheduler()
 {
 	struct proc *p;
+
 	for (;;) {
-		/*int has_proc = 0;
-		for (p = pool; p < &pool[NPROC]; p++) {
-			if (p->state == RUNNABLE) {
-				has_proc = 1;
-				tracef("swtich to proc %d", p - pool);
-				p->state = RUNNING;
-				current_proc = p;
-				swtch(&idle.context, &p->context);
-			}
-		}
-		if(has_proc == 0) {
-			panic("all app are over!\n");
-		}*/
-		p = fetch_task();
+		p = pick_next_task();
 		if (p == NULL) {
 			panic("all app are over!\n");
 		}
-		tracef("swtich to proc %d", p - pool);
+
+		tracef("switch to proc %d", p - pool);
 		p->state = RUNNING;
 		current_proc = p;
+
 		swtch(&idle.context, &p->context);
+
+		if (p->state == RUNNABLE) {
+			p->pass += p->stride;
+		}
 	}
 }
 
@@ -140,11 +158,11 @@ void sched()
 	swtch(&p->context, &idle.context);
 }
 
-// Give up the CPU for one scheduling round.
+// Changed to just mark process as runnable then go back
+// to running the sched
 void yield()
 {
 	current_proc->state = RUNNABLE;
-	add_task(current_proc);
 	sched();
 }
 
@@ -183,6 +201,12 @@ int fork()
 	// Cause fork to return 0 in the child.
 	np->trapframe->a0 = 0;
 	np->parent = p;
+
+	// Children inherit the parents scheduling config
+	np->priority = p->priority;
+	np->stride = p->stride;
+	np->pass = p->pass;
+
 	np->state = RUNNABLE;
 	add_task(np);
 	return np->pid;
@@ -225,8 +249,9 @@ int wait(int pid, int *code)
 		if (!havekids) {
 			return -1;
 		}
+
+		// Changed, does not need put into queue so just make runnable again
 		p->state = RUNNABLE;
-		add_task(p);
 		sched();
 	}
 }
